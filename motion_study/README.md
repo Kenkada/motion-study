@@ -123,8 +123,8 @@ again on **Download all** if the settings have changed since. Frames where nobod
 reported too, with `run_info.json` only. **The video is never sent.** Testers see a notice saying
 the results are shared.
 
-The receiver is `collector/drive_collector.gs`, a free Google Apps Script that saves each run in a
-private folder of the owner's Google Drive, both as the ZIP and unzipped. Setup instructions are at
+The receiver is `collector/drive_collector.gs` (with `collector/appsscript.json`), a free Google Apps Script that saves each run in a
+private folder of the owner's Google Drive, both as the ZIP and unzipped. It asks only for the `drive.file` permission (files it created itself), not the whole Drive. Setup instructions are at
 the top of that file. With an empty `COLLECT_URL`, nothing is sent anywhere.
 
 ## Where videos are stored
