@@ -5,6 +5,7 @@
 import { Study, OUTPUTS, CanvasPen, SvgPen, TRAJ, ANGLES, anglesOf, fmtAngle, safeScale, fmtT } from './render.js';
 import { makeZip } from './zip.js';
 import * as engine from './engine.js';
+import { COLLECT_URL, COLLECT_KEY } from './config.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -37,6 +38,7 @@ const state = {
   s: { ...structuredClone(DEFAULTS), ...(store.get('ms-settings') || {}) },
 };
 state.s.trajJoints = { ...DEFAULTS.trajJoints, ...(state.s.trajJoints || {}) };
+$$('.collect-note').forEach((el) => (el.hidden = !COLLECT_URL));
 const study = new Study();
 let built = {};
 // For use from the browser console (e.g. scripted exports): window.motionStudy.state / .study / .built()
@@ -301,6 +303,7 @@ async function detect(i) {
     state.people = people; state.detectFrame = i;
     const n = people.length;
     $('#detect-status').textContent = n ? `${n} ${n === 1 ? 'person' : 'people'} found` : 'No people found on this frame - try another frame';
+    if (!n) submitInfo('no-people', { frame: i, detect: { quality: $('#quality').value, max_width: +$('#max-width').value } });
     const list = $('#people-list');
     list.innerHTML = n ? '<span class="muted small" style="width:100%">Indices on this frame:</span>' : '';
     for (const p of people) {
@@ -313,6 +316,7 @@ async function detect(i) {
     drawPreview();
   } catch (e) {
     if (seq === detectSeq) $('#detect-status').textContent = `Detection failed: ${e.message}`;
+    submitInfo('detect-error', { frame: i, error: String(e.message || e) });
   }
 }
 $('#person-index').addEventListener('input', drawPreview);
@@ -370,6 +374,7 @@ async function startAnalysis() {
         body: JSON.stringify({ person: idx, start, end, step, quality: $('#quality').value, conf: +$('#conf').value, max_width: +$('#max-width').value, pose: true, hands }),
       });
       state.frames = []; state.params = {};
+      state.run = { started: new Date().toISOString(), t0: performance.now(), status: 'running' };
       enterResults(true);
     } else {
       runBrowser({ person: idx, box: person.box, start, end, step, quality: $('#quality').value, maxW: +$('#max-width').value, hands });
@@ -384,6 +389,7 @@ async function startAnalysis() {
 function runBrowser(p) {
   const m = state.job;
   state.frames = []; state.cancel = false;
+  state.run = { started: new Date().toISOString(), t0: performance.now(), status: 'running' };
   state.params = { person: p.person, start: p.start, end: p.end, step: p.step, quality: p.quality, max_width: p.maxW, pose: true, hands: p.hands,
     box: p.box, fps: m.fps, width: m.width, height: m.height, kind: m.kind, name: m.name, engine: 'browser' };
   enterResults(true);
@@ -401,11 +407,17 @@ function runBrowser(p) {
     onFrame: (rec, n, fps) => { state.frames.push(rec); show(n, fps); refreshSoon(900); },
   })).then(() => {
     state.running = false;
+    state.run.status = state.cancel ? 'stopped' : 'done';
     setProgress($('#run-progress'), 1, state.cancel ? `Stopped at ${nf.format(state.frames.length)} frames` : `Done · ${nf.format(state.frames.length)} frames analysed`);
   }).catch((e) => {
     state.running = false;
+    state.run.status = 'error'; state.run.error = String(e.message || e);
     setProgress($('#run-progress'), 0, `Error: ${e.message}`);
-  }).finally(() => { $('#btn-cancel').hidden = true; refreshSoon(0); });
+  }).finally(() => {
+    $('#btn-cancel').hidden = true;
+    state.run.seconds = +((performance.now() - state.run.t0) / 1000).toFixed(1);
+    if (!$('#step-results').hidden) { refresh(); submitRun('analysis'); } else refreshSoon(0);
+  });
 }
 
 // --------------------------------------------------------------------------- //
@@ -440,6 +452,7 @@ async function poll() {
     const r = await api(`api/jobs/${state.job.id}/status?since=${state.frames.length}`);
     if (r.since === state.frames.length) state.frames.push(...r.frames);
     state.params = r.params;
+    const wasRunning = state.running;
     state.running = r.state === 'running';
     const frac = r.total ? r.done / r.total : (r.state === 'done' ? 1 : 0);
     let text;
@@ -452,6 +465,11 @@ async function poll() {
     $('#btn-cancel').hidden = !state.running;
     refreshSoon(state.running ? 900 : 0);
     if (state.running) pollTimer = setTimeout(poll, 700);
+    else if (wasRunning && state.run) {
+      Object.assign(state.run, { status: r.state === 'cancelled' ? 'stopped' : r.state, error: r.error || undefined,
+        seconds: +((performance.now() - state.run.t0) / 1000).toFixed(1) });
+      refresh(); submitRun('analysis');
+    }
   } catch (e) {
     setProgress($('#run-progress'), 0, `Lost contact with the server: ${e.message}`);
     pollTimer = setTimeout(poll, 3000);
@@ -806,9 +824,9 @@ $('#btn-json').addEventListener('click', () => download(new Blob([rawJson()], { 
 // --------------------------------------------------------------------------- //
 // Exports
 // --------------------------------------------------------------------------- //
-function renderRaster(o, fmt) {
+function renderRaster(o, fmt, want = null) {
   const b = built[o.id]; if (!b) return Promise.resolve(null);
-  const scale = safeScale(b.W, b.H, +$('#export-scale').value);
+  const scale = safeScale(b.W, b.H, want || +$('#export-scale').value);
   const c = document.createElement('canvas');
   b.draw(new CanvasPen(c, b.W, b.H, scale));
   const type = { png: 'image/png', jpeg: 'image/jpeg', webp: 'image/webp' }[fmt];
@@ -855,14 +873,16 @@ ${rows.map((r) => `<tr>${rowCells(r).map((c) => `<td>${c}</td>`).join('')}</tr>`
 </tbody></table></div></body></html>`;
 }
 
-async function allFiles(btn) {
+async function allFiles(btn, formats = ['png', 'svg'], scale = null) {
   const files = [], svgs = {};
   for (const o of OUTPUTS) {
     if (!built[o.id]) continue;
-    btn.textContent = `Rendering ${o.title}…`;
+    if (btn) btn.textContent = `Rendering ${o.title}…`;
     await new Promise((r) => setTimeout(r, 0));
-    const png = await renderRaster(o, 'png');
-    if (png) files.push({ name: `${o.file}.png`, data: png });
+    for (const fmt of formats.filter((f) => f !== 'svg')) {
+      const img = await renderRaster(o, fmt, scale);
+      if (img) files.push({ name: `${o.file}.${fmt === 'jpeg' ? 'jpg' : fmt}`, data: img });
+    }
     svgs[o.id] = renderSvg(o);
     files.push({ name: `${o.file}.svg`, data: svgs[o.id] });
   }
@@ -893,7 +913,83 @@ $('#btn-zip').addEventListener('click', async () => {
   try {
     download(await makeZip(await allFiles(btn)), `${baseName()}_motion_study.zip`);
   } finally { btn.disabled = false; btn.textContent = label; }
+  submitRun('download'); // the settings the tester ended up with
 });
+
+// --------------------------------------------------------------------------- //
+// Test-run collection (config.js -> collector/drive_collector.gs on the owner's Google Drive).
+// Sends outputs and data only, never the video.
+// --------------------------------------------------------------------------- //
+function modelsUsed() {
+  const p = state.params;
+  if (state.mode === 'server' || p.engine === 'server') {
+    return { engine: 'server (Python)', segmentation: `YOLOv8${p.quality === 'accurate' ? 's' : 'n'}-seg + ByteTrack`, pose: 'YOLOv8n-pose',
+      hands: p.hands ? 'MediaPipe hand_landmarker (Python)' : null };
+  }
+  return { engine: 'browser (MediaPipe Tasks Vision, CPU / WebAssembly)', runtime: engine.TV,
+    pose: engine.MODELS[p.quality || $('#quality').value] || engine.MODELS.full, person_detector: engine.MODELS.person,
+    segmenter_fallback: engine.MODELS.segment, hands: p.hands === false ? null : engine.MODELS.hand };
+}
+function runInfo(kind, extra = {}) {
+  const f = state.frames;
+  return {
+    kind, sent_at: new Date().toISOString(), page: location.href, user_agent: navigator.userAgent,
+    screen: `${screen.width}x${screen.height} @${window.devicePixelRatio || 1}x`,
+    source: state.job ? { ...state.job } : null, mode: state.mode, models: modelsUsed(),
+    analysis_parameters: state.params, run: state.run ? { ...state.run, t0: undefined } : null,
+    results: { frames_analysed: f.length, frames_with_person: f.filter((x) => x.c).length,
+      frames_with_skeleton: f.filter((x) => x.kp).length, frames_with_hands: f.filter((x) => x.h && x.h.length).length,
+      keyframes: study.keys.length, keyframe_frames: study.keys.map((k) => k.i), keyframe_times_s: study.keys.map((k) => k.t) },
+    render_settings: state.s, export_scale: +$('#export-scale').value, ...extra,
+  };
+}
+const toB64 = (blob) => new Promise((res, rej) => {
+  const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob);
+});
+let collectQueue = Promise.resolve(), lastSent = '';
+async function send(kind, zip) {
+  const body = JSON.stringify({ app: 'motion-study', key: COLLECT_KEY, kind, name: baseName(), zip });
+  try {
+    // text/plain keeps it a "simple" request (no CORS preflight, which Apps Script does not answer)
+    const r = await fetch(COLLECT_URL, { method: 'POST', body, headers: { 'Content-Type': 'text/plain;charset=utf-8' } });
+    return await r.json();
+  } catch {
+    await fetch(COLLECT_URL, { method: 'POST', mode: 'no-cors', body }); // reply unreadable: send blind
+    return { ok: true, blind: true };
+  }
+}
+function note(t) { const el = $('#collect-status'); if (el) el.textContent = t; }
+// Everything: the six outputs in PNG, JPEG, WebP and SVG, report.html, CSV, frames.json, run_info.json.
+function submitRun(kind) {
+  if (!COLLECT_URL || !state.frames.length || state.mode === 'file') return;
+  const sig = JSON.stringify([state.run?.started, state.s, $('#export-scale').value, state.frames.length]);
+  if (sig === lastSent) return; // nothing new since the last copy
+  lastSent = sig;
+  collectQueue = collectQueue.then(async () => {
+    try {
+      note('Sending a copy of the results to the study organiser…');
+      const LIMIT = 30 * 1024 * 1024;
+      let files = await allFiles(null, ['png', 'jpeg', 'webp', 'svg']);
+      let zip = await makeZip([...files, { name: 'run_info.json', data: JSON.stringify(runInfo(kind), null, 2) }]);
+      if (zip.size > LIMIT) { // too big for one request: 1x rasters, PNG + SVG only
+        const reduced = 'rasters at 1x, PNG and SVG only (the full set was too large to send)';
+        files = await allFiles(null, ['png', 'svg'], 1);
+        zip = await makeZip([...files, { name: 'run_info.json', data: JSON.stringify(runInfo(kind, { reduced }), null, 2) }]);
+      }
+      const r = await send(kind, await toB64(zip));
+      note(r.ok ? 'A copy of the results was sent to the study organiser.' : `Could not send the results copy (${r.error}).`);
+    } catch (e) {
+      note(`Could not send the results copy (${e.message}).`);
+    }
+  });
+}
+// Small events without outputs (e.g. nobody detected), so failures show up too.
+function submitInfo(kind, extra) {
+  if (!COLLECT_URL) return;
+  collectQueue = collectQueue.then(async () => {
+    try { await send(kind, await toB64(await makeZip([{ name: 'run_info.json', data: JSON.stringify(runInfo(kind, extra), null, 2) }]))); } catch { /* ignore */ }
+  });
+}
 
 // --------------------------------------------------------------------------- //
 // Lightbox

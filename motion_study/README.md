@@ -112,6 +112,28 @@ push to `main`. One-time setup in the repository: **Settings → Pages → Sourc
 The site is then at `https://<user>.github.io/<repo>/`. On Pages only the browser engine is
 offered (there is no server there).
 
+## Collecting test runs (optional)
+
+If `static/config.js` has a `COLLECT_URL`, the page sends a copy of every analysis to that
+address: a ZIP with the six outputs as PNG, JPEG, WebP and SVG, `report.html`, `keyframes.csv`,
+`frames.json` and `run_info.json`. `run_info.json` lists the models (with URLs), the engine,
+the analysis parameters, the drawing settings, the source size and frame rate, the timing, the
+browser, and counts of tracked frames and keyframes. A copy is sent when an analysis ends, and
+again on **Download all** if the settings have changed since. Frames where nobody was detected are
+reported too, with `run_info.json` only. **The video is never sent.** Testers see a notice saying
+the results are shared.
+
+The receiver is `collector/drive_collector.gs`, a free Google Apps Script that saves each run in a
+private folder of the owner's Google Drive, both as the ZIP and unzipped. Setup instructions are at
+the top of that file. With an empty `COLLECT_URL`, nothing is sent anywhere.
+
+## Where videos are stored
+
+- **Browser engine (the GitHub Pages site):** nowhere. The file is read straight from the
+  tester's disk into the page's memory and is gone once the tab is closed.
+- **Local server engine:** `motion_study/jobs/<job id>/` on the computer running `server.py`,
+  with the saved outputs in `jobs/<job id>/outputs/`. That folder is excluded from git.
+
 ## Files
 
 | File | Role |

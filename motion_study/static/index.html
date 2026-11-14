@@ -30,6 +30,8 @@
       <span>MP4, MOV, WebM… or one or more images (JPG/PNG/WebP), treated as a sequence sorted by file name.
         The analysis runs in this browser with free MediaPipe models: the video is not uploaded anywhere.</span>
     </label>
+    <p class="hint small collect-note" hidden><strong>Test version:</strong> after each analysis, a copy of the results
+      (the sketches, measurements and settings, not the video) is sent to the study organiser.</p>
     <fieldset id="engine-pick" class="engine" hidden>
       <legend>Where to run the analysis</legend>
       <label class="check"><input type="radio" name="engine" value="browser" checked> In this browser (MediaPipe pose, silhouette and hands)</label>
@@ -206,6 +208,7 @@
         <button id="btn-zip" class="primary wide">Download all (ZIP)</button>
         <button id="btn-save" class="ghost wide" style="margin-top:6px">Save all to output folder</button>
         <p class="hint small" id="save-note"></p>
+        <p class="hint small collect-note" id="collect-status" hidden></p>
         <p class="hint small">The ZIP has a PNG and an SVG of each output, a report.html, keyframes.csv and the raw tracking data (frames.json).
           SVG is vector, so it stays sharp at any print size.</p>
         <div class="actions">
