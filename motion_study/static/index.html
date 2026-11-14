@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Study</title>
+<link rel="stylesheet" href="style.css">
+<meta name="description" content="Time-motion study sketches of one person from video: sketch and skeleton grids, overlaps, hand and posture detail. Runs in the browser.">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>Motion Study</h1>
+    <p class="sub">Time–motion sketches from video: one person's movement as sketch and skeleton grids and overlaps, with hand, wrist and sitting-posture detail.</p>
+  </div>
+  <nav class="steps" aria-label="Progress">
+    <span data-step="upload" class="on">1 Open</span>
+    <span data-step="select">2 Choose person</span>
+    <span data-step="results">3 Study</span>
+  </nav>
+</header>
+
+<main>
+  <!-- STEP 1: upload -->
+  <section id="step-upload" class="card">
+    <h2>1 · Open a video or images</h2>
+    <label id="drop" class="drop" tabindex="0">
+      <input id="file" type="file" accept="video/*,image/*,.json" multiple hidden>
+      <strong>Drop a video here, or click to choose</strong>
+      <span>MP4, MOV, WebM… or one or more images (JPG/PNG/WebP), treated as a sequence sorted by file name.
+        The analysis runs in this browser with free MediaPipe models: the video is not uploaded anywhere.</span>
+    </label>
+    <fieldset id="engine-pick" class="engine" hidden>
+      <legend>Where to run the analysis</legend>
+      <label class="check"><input type="radio" name="engine" value="browser" checked> In this browser (MediaPipe pose, silhouette and hands)</label>
+      <label class="check"><input type="radio" name="engine" value="server"> On the local Python server (YOLOv8 silhouettes + tracking, MediaPipe hands; keeps the file in <code>jobs\</code>)</label>
+    </fieldset>
+    <p class="hint small">Or <label class="linklike">open a saved study (<code>frames.json</code>)<input id="open-json" type="file" accept=".json,application/json" hidden></label>
+      to re-draw it without the video.</p>
+    <div id="upload-progress" class="progress" hidden><div></div><span></span></div>
+    <div id="recent" hidden>
+      <h3>Recent studies</h3>
+      <ul id="recent-list"></ul>
+    </div>
+  </section>
+
+  <!-- STEP 2: select person -->
+  <section id="step-select" class="card" hidden>
+    <h2>2 · Choose the person to track</h2>
+    <p class="hint">Move the slider to a frame where the person is clearly visible. Every detected person gets an index number.
+      Type the index of the person to study. Analysis starts at this frame.</p>
+    <div class="select-layout">
+      <div class="preview-wrap">
+        <canvas id="preview"></canvas>
+        <div id="detect-status" class="overlay-msg"></div>
+      </div>
+      <div class="select-form">
+        <label class="row">Start frame
+          <input id="frame-slider" type="range" min="0" max="0" value="0">
+        </label>
+        <div class="readout" id="frame-readout">—</div>
+        <div id="fps-row" class="row" hidden>
+          <label>Frame rate (fps, measured) <input id="fps" type="number" min="1" max="240" step="0.001"></label>
+        </div>
+        <div id="img-interval-row" class="row" hidden>
+          <label>Seconds between images <input id="img-interval" type="number" min="0.001" step="0.1" value="1"></label>
+        </div>
+        <div id="people-list" class="people"></div>
+        <label class="row big">Person index
+          <input id="person-index" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 1" required>
+        </label>
+        <details>
+          <summary>Analysis options</summary>
+          <label class="row">End time (s) <input id="end-time" type="number" min="0" step="0.1"></label>
+          <label class="row">Analyse every Nth frame <input id="frame-step" type="number" min="1" step="1" value="1"></label>
+          <label class="row">Model
+            <select id="quality"></select>
+          </label>
+          <label class="row" id="conf-row">Detection confidence <input id="conf" type="number" min="0.05" max="0.95" step="0.05" value="0.35"></label>
+          <label class="row">Inference width (px) <input id="max-width" type="number" min="320" step="32" value="960"></label>
+          <label class="check"><input id="with-hands" type="checkbox" checked> Track hands, wrists and fingers (21 points per hand)</label>
+          <p class="hint small" id="engine-note"></p>
+        </details>
+        <div class="estimate" id="estimate"></div>
+        <div class="actions">
+          <button id="btn-analyse" class="primary">Analyse</button>
+          <button id="btn-new" class="ghost">Open a different file</button>
+        </div>
+        <div id="select-error" class="error" role="alert"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 3: results -->
+  <section id="step-results" hidden>
+    <div class="card run-bar">
+      <div class="run-info">
+        <strong id="study-name">—</strong>
+        <span id="run-status" class="muted"></span>
+      </div>
+      <div id="run-progress" class="progress"><div></div><span></span></div>
+      <div class="actions">
+        <button id="btn-cancel" class="ghost" hidden>Stop</button>
+        <button id="btn-reselect" class="ghost">Change person / range</button>
+        <button id="btn-upload2" class="ghost">Open another file</button>
+      </div>
+    </div>
+
+    <div class="results-layout">
+      <aside class="card controls" id="controls">
+        <h3>Keyframe selection</h3>
+        <label class="row">Change metric
+          <select data-s="metric">
+            <option value="shape">Silhouette change (area + motion)</option>
+            <option value="area">Area only</option>
+          </select>
+        </label>
+        <label class="row">Threshold <output data-o="threshold"></output>
+          <input type="range" data-s="threshold" min="1" max="80" step="1">
+        </label>
+        <label class="row" data-show="area">Area smoothing (frames) <output data-o="smooth"></output>
+          <input type="range" data-s="smooth" min="1" max="15" step="2">
+        </label>
+        <label class="row">Minimum gap (s) <output data-o="minGap"></output>
+          <input type="range" data-s="minGap" min="0" max="2" step="0.05">
+        </label>
+        <label class="check"><input type="checkbox" data-s="includeLast"> Always include the last frame</label>
+        <p class="kf-count" id="kf-count"></p>
+
+        <h3>Ink</h3>
+        <div class="seg" role="group" aria-label="Background">
+          <button data-bg="white">Black on white</button>
+          <button data-bg="black">White on black</button>
+        </div>
+        <label class="row">Line opacity <output data-o="opacity"></output>
+          <input type="range" data-s="opacity" min="0.03" max="1" step="0.01">
+        </label>
+        <label class="row">Current pose opacity (grids) <output data-o="current"></output>
+          <input type="range" data-s="current" min="0.05" max="1" step="0.01">
+        </label>
+        <label class="row">Line weight <output data-o="lineWidth"></output>
+          <input type="range" data-s="lineWidth" min="0.3" max="5" step="0.1">
+        </label>
+        <label class="row">Pencil passes <output data-o="passes"></output>
+          <input type="range" data-s="passes" min="1" max="8" step="1">
+        </label>
+        <label class="row">Wobble <output data-o="wobble"></output>
+          <input type="range" data-s="wobble" min="0" max="4" step="0.1">
+        </label>
+
+        <h3>Layout</h3>
+        <label class="row">Grid columns (0 = auto) <output data-o="cols"></output>
+          <input type="range" data-s="cols" min="0" max="12" step="1">
+        </label>
+        <label class="row">Earlier poses shown faintly in each cell <output data-o="ghosts"></output>
+          <input type="range" data-s="ghosts" min="0" max="12" step="1">
+        </label>
+        <label class="row">Cell framing
+          <select data-s="framing">
+            <option value="follow">Follow the person</option>
+            <option value="fixed">Fixed (whole movement area)</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" data-s="labels"> Titles, times and timeline</label>
+        <label class="check"><input type="checkbox" data-s="numbers"> Number the poses in overlaps</label>
+        <label class="check"><input type="checkbox" data-s="tone"> Tonal fill in sketch overlap</label>
+
+        <h3>Pose outline</h3>
+        <label class="check"><input type="checkbox" data-s="handDetail"> Hands with fingers in the outline</label>
+        <label class="check"><input type="checkbox" data-s="limbs"> Limb contours inside the outline (arms across the body, folded legs)</label>
+        <label class="row" data-show-if="limbs">Limb width <output data-o="limbWidth"></output>
+          <input type="range" data-s="limbWidth" min="0.6" max="1.6" step="0.05">
+        </label>
+        <label class="check"><input type="checkbox" data-s="postureLines"> Gesture lines (spine, shoulders, pelvis, limbs)</label>
+        <label class="check"><input type="checkbox" data-s="handSkeleton"> Hand skeleton on skeletons</label>
+        <label class="check"><input type="checkbox" data-s="angleLabels"> Joint angles on the skeleton grid</label>
+
+        <h3>Skeleton</h3>
+        <label class="row">Skeleton opacity, grid <output data-o="skelOpacity"></output>
+          <input type="range" data-s="skelOpacity" min="0.05" max="1" step="0.01">
+        </label>
+        <label class="row">Skeleton opacity, overlap <output data-o="skelOverlap"></output>
+          <input type="range" data-s="skelOverlap" min="0.03" max="1" step="0.01">
+        </label>
+        <label class="check"><input type="checkbox" data-s="shade"> Body shading under skeleton</label>
+        <label class="check"><input type="checkbox" data-s="sweep"> Swept surface between poses</label>
+        <label class="check"><input type="checkbox" data-s="traj"> Joint trajectories</label>
+        <label class="row">Trajectory opacity <output data-o="trajOpacity"></output>
+          <input type="range" data-s="trajOpacity" min="0.05" max="1" step="0.01">
+        </label>
+        <label class="check"><input type="checkbox" data-s="trajAll"> Trajectories through every analysed frame (not only keyframes)</label>
+        <label class="row" data-show-if="trajAll">Trajectory smoothing <output data-o="trajSmooth"></output>
+          <input type="range" data-s="trajSmooth" min="1" max="15" step="2">
+        </label>
+        <div class="joints" id="traj-joints"></div>
+
+        <h3>Export</h3>
+        <label class="row">Raster size
+          <select id="export-scale">
+            <option value="1">1× source pixels</option>
+            <option value="2" selected>2× source pixels</option>
+            <option value="3">3× source pixels</option>
+            <option value="4">4× source pixels</option>
+          </select>
+        </label>
+        <button id="btn-zip" class="primary wide">Download all (ZIP)</button>
+        <button id="btn-save" class="ghost wide" style="margin-top:6px">Save all to output folder</button>
+        <p class="hint small" id="save-note"></p>
+        <p class="hint small">The ZIP has a PNG and an SVG of each output, a report.html, keyframes.csv and the raw tracking data (frames.json).
+          SVG is vector, so it stays sharp at any print size.</p>
+        <div class="actions">
+          <button id="btn-csv" class="ghost">Keyframes CSV</button>
+          <button id="btn-json" class="ghost">Raw data JSON</button>
+        </div>
+        <button id="btn-reset" class="link">Reset settings</button>
+      </aside>
+
+      <div class="outputs">
+        <div class="out-grid" id="out-grid"></div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>Timeline</h3>
+            <span class="muted small">Change since the previous keyframe; a keyframe is taken where it crosses the threshold.</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chart-change"></canvas><div class="tip" id="chart-tip" hidden></div></div>
+          <div class="chart-wrap short"><canvas id="chart-area"></canvas></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>Posture and hand angles</h3>
+            <select id="angle-pick" aria-label="Measure"></select>
+            <span class="muted small" id="angle-help"></span>
+          </div>
+          <div class="chart-wrap"><canvas id="chart-angle"></canvas><div class="tip" id="angle-tip" hidden></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>Keyframes</h3><span class="muted small" id="table-note"></span></div>
+          <div class="table-wrap">
+            <table id="kf-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="lightbox" class="lightbox" hidden>
+  <div class="lb-bar">
+    <strong id="lb-title"></strong>
+    <span class="muted" id="lb-size"></span>
+    <button id="lb-zoom" class="ghost">Actual size</button>
+    <button id="lb-close" class="ghost">Close</button>
+  </div>
+  <div class="lb-body" id="lb-body"><canvas id="lb-canvas"></canvas></div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# model weights (downloaded automatically on first use)
+*.pt
+*.task
+
+# generated outputs and uploads
+*_sketch.mp4
+*_sketch.png
+motion_study/jobs/
+
+# environments and caches
+.venv/
+__pycache__/
+.claude/
