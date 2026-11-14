@@ -156,3 +156,9 @@ thead th { position: sticky; top: 0; background: var(--card); font-weight: 600; 
 .linklike { text-decoration: underline; cursor: pointer; color: var(--ink); }
 code { font-size: 0.92em; }
 #angle-pick { font-size: 13px; padding: 4px 6px; }
+
+.site-footer { max-width: 1800px; margin: 0 auto; padding: 16px 24px 28px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+.site-footer p { margin: 0 0 4px; }
+.site-footer a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.site-footer a:hover { color: var(--ink); }
+@media (max-width: 760px) { .site-footer { padding: 14px 16px 24px; } }
