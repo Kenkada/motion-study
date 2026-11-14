@@ -10,6 +10,8 @@ const MODELS = {
   full: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task',
   heavy: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task',
   hand: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+  person: 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/latest/efficientdet_lite2.tflite',
+  segment: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite',
 };
 // MediaPipe 33-point pose -> COCO 17 (nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles)
 const MP2COCO = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
@@ -35,16 +37,46 @@ async function create(Klass, opts, cpuOnly = false) {
   }
 }
 
-export async function getPose(quality = 'full') {
+// Pose + silhouette. Two instances: 'scene' looks for several people on a whole frame,
+// 'crop' runs on a crop around one person (the main path: sharper mask, far fewer misses).
+// CPU only: on many GPUs the segmentation mask reads back as all zeros, and the outline matters most.
+export async function getPose(quality = 'full', kind = 'crop') {
   await vision();
-  if (!cache['pose_' + quality]) {
-    cache['pose_' + quality] = await create(mp.PoseLandmarker, {
+  const key = `pose_${quality}_${kind}`;
+  if (!cache[key]) {
+    cache[key] = await create(mp.PoseLandmarker, {
       baseOptions: { modelAssetPath: MODELS[quality] || MODELS.full },
-      runningMode: 'IMAGE', numPoses: 6, outputSegmentationMasks: true,
-      minPoseDetectionConfidence: 0.4, minPosePresenceConfidence: 0.4, minTrackingConfidence: 0.4,
-    }, true); // CPU: on many GPUs the segmentation mask reads back as all zeros, and the outline matters most
+      runningMode: 'IMAGE', numPoses: kind === 'scene' ? 6 : 1, outputSegmentationMasks: true,
+      minPoseDetectionConfidence: 0.2, minPosePresenceConfidence: 0.2, minTrackingConfidence: 0.2,
+    }, true);
   }
-  return cache['pose_' + quality];
+  return cache[key];
+}
+
+// Person segmentation (hair, skin, clothes...; everything but background = the person). Used when
+// the pose model finds no one in the crop, so the outline does not drop out.
+export async function getSegmenter() {
+  await vision();
+  if (!cache.seg) {
+    cache.seg = await create(mp.ImageSegmenter, {
+      baseOptions: { modelAssetPath: MODELS.segment },
+      runningMode: 'IMAGE', outputCategoryMask: true, outputConfidenceMasks: false,
+    }, true);
+  }
+  return cache.seg;
+}
+
+// Person boxes (EfficientDet-Lite2, COCO): finds people the pose detector misses
+// (crouched, side-on, small, cluttered scenes).
+export async function getDetector() {
+  await vision();
+  if (!cache.det) {
+    cache.det = await create(mp.ObjectDetector, {
+      baseOptions: { modelAssetPath: MODELS.person },
+      runningMode: 'IMAGE', categoryAllowlist: ['person'], scoreThreshold: 0.25, maxResults: 10,
+    }, true);
+  }
+  return cache.det;
 }
 
 export async function getHand() {
@@ -152,28 +184,99 @@ function inferCanvas(src, maxW) {
   return { c, ctx: c.getContext('2d', { willReadFrequently: true }), scale };
 }
 
-function personsFrom(res, src, spacing) {
+// Joints MediaPipe extrapolates outside the picture (e.g. legs cut off by the camera) count as not visible.
+function toKp(lm, mapX, mapY, W, H) {
+  return MP2COCO.map((j) => {
+    const x = mapX(lm[j].x), y = mapY(lm[j].y);
+    const inPic = x >= -0.01 * W && x <= 1.01 * W && y >= -0.01 * H && y <= 1.01 * H;
+    return [x, y, inPic ? (lm[j].visibility ?? 1) : 0];
+  });
+}
+function boxOfKp(kp) {
+  const vis = kp.filter((p) => p[2] > 0.3);
+  if (!vis.length) return null;
+  return [Math.min(...vis.map((p) => p[0])), Math.min(...vis.map((p) => p[1])), Math.max(...vis.map((p) => p[0])), Math.max(...vis.map((p) => p[1]))];
+}
+
+// People found by the whole-frame pose detector (inference canvas -> source coords).
+function scenePersons(res, src, spacing) {
   const out = [];
   (res.landmarks || []).forEach((lm, k) => {
-    // Joints MediaPipe extrapolates outside the picture (e.g. legs cut off by the camera) count as not visible.
-    const inside = (q) => q.x >= -0.01 && q.x <= 1.01 && q.y >= -0.01 && q.y <= 1.01;
-    const kp = MP2COCO.map((j) => [lm[j].x * src.width, lm[j].y * src.height, inside(lm[j]) ? (lm[j].visibility ?? 1) : 0]);
+    const kp = toKp(lm, (x) => x * src.width, (y) => y * src.height, src.width, src.height);
     let o = null;
     const m = res.segmentationMasks?.[k];
-    if (m) {
-      const data = m.getAsFloat32Array();
-      o = outlineFromBinary(binaryFromFloat(data, m.width, m.height), m.width, m.height, src.width / m.width, { spacing, smooth: 4, minArea: 400 });
-    }
-    let box = o?.box;
-    if (!box) {
-      const vis = kp.filter((p) => p[2] > 0.3);
-      if (!vis.length) return;
-      box = [Math.min(...vis.map((p) => p[0])), Math.min(...vis.map((p) => p[1])), Math.max(...vis.map((p) => p[0])), Math.max(...vis.map((p) => p[1]))];
-    }
+    if (m) o = outlineFromBinary(binaryFromFloat(m.getAsFloat32Array(), m.width, m.height), m.width, m.height, src.width / m.width, { spacing, smooth: 4, minArea: 400 });
+    const box = o?.box || boxOfKp(kp);
+    if (!box) return;
     const conf = lm.reduce((s, p) => s + (p.visibility ?? 1), 0) / lm.length;
     out.push({ kp, outline: o?.c || null, area: o?.area || 0, box, conf });
   });
   return out;
+}
+
+// Pose + silhouette of the one person inside a square crop around `box` (source px).
+const CROP_PX = 512;
+let cropCanvas = null;
+function drawCrop(img, box) {
+  const cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+  const side = Math.max(box[2] - box[0], box[3] - box[1]) * 1.3 + 16;
+  cropCanvas = cropCanvas || Object.assign(document.createElement('canvas'), { width: CROP_PX, height: CROP_PX });
+  const ctx = cropCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, CROP_PX, CROP_PX);
+  ctx.drawImage(img, cx - side / 2, cy - side / 2, side, side, 0, 0, CROP_PX, CROP_PX);
+  return { x0: cx - side / 2, y0: cy - side / 2, side };
+}
+
+// Crop mask (1 = person) -> outline in source px; mask pixels outside the picture are dropped.
+function cropOutline(bin, mw, mh, cr, src, spacing) {
+  const { x0, y0, side } = cr, mk = side / mw;
+  for (let yy = 0; yy < mh; yy++) for (let xx = 0; xx < mw; xx++) {
+    const sx = x0 + (xx + 0.5) * mk, sy = y0 + (yy + 0.5) * mk;
+    if (sx < 0 || sy < 0 || sx >= src.width || sy >= src.height) bin[yy * mw + xx] = 0;
+  }
+  const o = outlineFromBinary(bin, mw, mh, mk, { spacing, smooth: 4, minArea: 400 });
+  if (!o) return null;
+  return { outline: o.c.map(([x, y]) => [x + x0, y + y0]), area: o.area, box: [o.box[0] + x0, o.box[1] + y0, o.box[2] + x0, o.box[3] + y0] };
+}
+
+// Pose + silhouette of the one person inside a square crop around `box` (source px).
+function cropPose(pose, img, src, box, spacing = 4) {
+  const cr = drawCrop(img, box);
+  let out = null;
+  pose.detect(cropCanvas, (res) => {
+    const lm = res.landmarks?.[0], m = res.segmentationMasks?.[0];
+    if (!lm || !m) return;
+    const o = cropOutline(binaryFromFloat(m.getAsFloat32Array(), m.width, m.height), m.width, m.height, cr, src, spacing);
+    if (!o) return;
+    const kp = toKp(lm, (x) => cr.x0 + x * cr.side, (y) => cr.y0 + y * cr.side, src.width, src.height);
+    out = { ...o, kp, conf: lm.reduce((s, p) => s + (p.visibility ?? 1), 0) / lm.length };
+  });
+  return out;
+}
+
+// Silhouette only (no joints), from the person segmenter, inside a crop around `box`.
+function cropSegment(seg, img, src, box, spacing = 4) {
+  const cr = drawCrop(img, box);
+  let out = null;
+  seg.segment(cropCanvas, (res) => {
+    const m = res.categoryMask;
+    if (!m) return;
+    const d = m.getAsUint8Array(), bin = new Uint8Array(d.length);
+    for (let k = 0; k < d.length; k++) bin[k] = d[k] !== 0 ? 1 : 0; // 0 = background
+    const o = cropOutline(bin, m.width, m.height, cr, src, spacing);
+    if (o) out = { ...o, kp: null, conf: 0.5 };
+  });
+  return out;
+}
+
+async function personBoxes(img, src, maxW) {
+  const det = await getDetector();
+  const { c, ctx, scale } = inferCanvas(src, maxW);
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  return { canvas: c, boxes: det.detect(c).detections.map((d) => {
+    const b = d.boundingBox;
+    return { box: [b.originX * scale, b.originY * scale, (b.originX + b.width) * scale, (b.originY + b.height) * scale], score: d.categories[0].score };
+  }) };
 }
 
 export function iou(a, b) {
@@ -243,14 +346,24 @@ export async function handsFor(img, kp) {
 // --------------------------------------------------------------------------- //
 // Step 3a: people on one frame
 // --------------------------------------------------------------------------- //
+// Candidates from the person detector and from the whole-frame pose detector are merged,
+// then each is refined with pose on a crop around it.
 export async function detectPeople(src, i, { quality = 'full', maxW = 960 } = {}) {
-  const pose = await getPose(quality);
-  await pose.setOptions({ runningMode: 'IMAGE' });
   const img = await src.frame(i);
-  const { c, ctx } = inferCanvas(src, maxW);
-  ctx.drawImage(img, 0, 0, c.width, c.height);
-  let people = [];
-  pose.detect(c, (res) => { people = personsFrom(res, src, 6); });
+  const { canvas, boxes } = await personBoxes(img, src, maxW);
+  const scene = await getPose(quality, 'scene'), crop = await getPose(quality, 'crop');
+  let found = [];
+  scene.detect(canvas, (res) => { found = scenePersons(res, src, 6); });
+  const cands = boxes.map((b) => ({ box: b.box, conf: b.score }));
+  for (const p of found) if (!cands.some((c) => iou(c.box, p.box) > 0.4)) cands.push({ box: p.box, conf: p.conf });
+  const seg = await getSegmenter();
+  const people = [];
+  for (const c of cands) {
+    const r = cropPose(crop, img, src, c.box, 6) || cropSegment(seg, img, src, c.box, 6);
+    const box = r ? r.box : c.box;
+    if (people.some((p) => iou(p.box, box) > 0.6)) continue; // same person found twice
+    people.push({ box, conf: c.conf, outline: r?.outline || null });
+  }
   people.sort((a, b) => ctr(a.box)[0] - ctr(b.box)[0]);
   return people.map((p, k) => ({ index: k + 1, box: p.box.map(r1), conf: +p.conf.toFixed(3), outline: p.outline }));
 }
@@ -258,46 +371,58 @@ export async function detectPeople(src, i, { quality = 'full', maxW = 960 } = {}
 // --------------------------------------------------------------------------- //
 // Step 3b/4: follow one person through the range
 // --------------------------------------------------------------------------- //
-let ts = 0;
+// Each frame: pose on a crop around the person's last box. Every REANCHOR frames, and whenever
+// the person is lost, the person detector re-centres the crop on the best-matching person.
+const REANCHOR = 10;
 export async function analyse(src, { start, end, step, box, quality = 'full', maxW = 960, hands = true, onFrame, cancelled, onStatus }) {
   onStatus?.('loading models');
-  const pose = await getPose(quality);
+  const crop = await getPose(quality, 'crop');
+  const seg = await getSegmenter();
+  await getDetector();
   if (hands) await getHand();
-  await pose.setOptions({ runningMode: 'VIDEO' });
-  const { c, ctx } = inferCanvas(src, maxW);
-  let last = box.slice(), lost = 0;
+  let last = box.slice(), lost = 0, n = 0, lastArea = 0;
   const t0 = performance.now();
-  let n = 0;
   onStatus?.('tracking');
+  const match = (cands) => {
+    if (!cands.length) return null;
+    const sc = cands.map((c) => iou(c.box, last));
+    let k = sc.indexOf(Math.max(...sc));
+    if (sc[k] > 0.2) return cands[k];
+    const diag = Math.hypot(last[2] - last[0], last[3] - last[1]);
+    const ds = cands.map((c) => Math.hypot(ctr(c.box)[0] - ctr(last)[0], ctr(c.box)[1] - ctr(last)[1]));
+    k = ds.indexOf(Math.min(...ds));
+    return ds[k] < 0.6 * diag * (1 + 0.15 * lost) ? cands[k] : null;
+  };
   for (let i = start; i <= end; i += step) {
     if (cancelled()) break;
     const img = await src.frame(i);
-    ctx.drawImage(img, 0, 0, c.width, c.height);
-    ts = Math.max(ts + 1, Math.round(performance.now()));
-    let people = [];
-    pose.detectForVideo(c, ts, (res) => { people = personsFrom(res, src, 4); });
     const rec = { i, t: +(i / src.fps).toFixed(4), area: 0, box: null, c: null, kp: null, h: null };
-    let pick = null;
-    if (people.length) {
-      const sc = people.map((p) => iou(p.box, last));
-      let k = sc.indexOf(Math.max(...sc));
-      if (sc[k] > 0.25) pick = people[k];
-      else {
-        const diag = Math.hypot(last[2] - last[0], last[3] - last[1]);
-        const ds = people.map((p) => Math.hypot(ctr(p.box)[0] - ctr(last)[0], ctr(p.box)[1] - ctr(last)[1]));
-        k = ds.indexOf(Math.min(...ds));
-        if (ds[k] < 0.6 * diag * (1 + 0.1 * lost)) pick = people[k];
-      }
+    let anchor = last;
+    if (lost > 0 || n % REANCHOR === 0) {
+      const m = match((await personBoxes(img, src, maxW)).boxes);
+      if (m) anchor = m.box;
     }
-    if (pick && pick.outline) {
-      rec.area = Math.round(pick.area); rec.box = pick.box.map(r1);
-      rec.c = pick.outline.map(([x, y]) => [r1(x), r1(y)]);
-      rec.kp = pick.kp.map(([x, y, v]) => [r1(x), r1(y), +v.toFixed(3)]);
-      if (hands) rec.h = await handsFor(img, rec.kp);
-      last = pick.box; lost = 0;
+    let r = cropPose(crop, img, src, anchor);
+    // a crop around a box that has drifted can miss: retry once around the last good box
+    if ((!r || iou(r.box, last) < 0.1) && anchor !== last) r = cropPose(crop, img, src, last);
+    // no pose found: take the silhouette from the segmenter so the outline does not drop out
+    if (!r || iou(r.box, last) < 0.1) { const sgm = cropSegment(seg, img, src, anchor); if (sgm) r = sgm; }
+    // a partial pose mask (silhouette suddenly much smaller): prefer the segmenter's if it fits better,
+    // keeping the joints from the pose model
+    else if (lastArea && r.area < 0.55 * lastArea) {
+      const sgm = cropSegment(seg, img, src, anchor);
+      if (sgm && Math.abs(sgm.area - lastArea) < Math.abs(r.area - lastArea)) r = { ...sgm, kp: r.kp };
+    }
+    if (r && (iou(r.box, last) > 0.1 || lost > 0)) {
+      rec.area = Math.round(r.area); rec.box = r.box.map(r1);
+      rec.c = r.outline.map(([x, y]) => [r1(x), r1(y)]);
+      rec.kp = r.kp ? r.kp.map(([x, y, v]) => [r1(x), r1(y), +v.toFixed(3)]) : null;
+      if (hands && rec.kp) rec.h = await handsFor(img, rec.kp);
+      last = r.box; lost = 0;
+      lastArea = lastArea ? 0.7 * lastArea + 0.3 * r.area : r.area;
     } else lost++;
     n++;
     onFrame(rec, n, n / ((performance.now() - t0) / 1000));
-    if (n % 2 === 0) await new Promise((r) => setTimeout(r, 0)); // let the page repaint
+    if (n % 2 === 0) await new Promise((res) => setTimeout(res, 0)); // let the page repaint
   }
 }

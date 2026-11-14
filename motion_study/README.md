@@ -29,9 +29,17 @@ Each sketch is the **tracked silhouette** of the person, plus:
 ## Two ways to run it
 
 **1. In the browser (default, and what the GitHub Pages site uses).** Everything runs in the
-page with Google's free MediaPipe models: pose with per-person silhouette, and the 21-point hand
-landmarker. The video never leaves the computer. The models (~9 MB pose + ~8 MB hands) and the
-MediaPipe runtime are downloaded once from Google's and jsDelivr's CDNs and cached by the browser.
+page with Google's free MediaPipe models, and the video never leaves the computer:
+
+- a person detector (EfficientDet-Lite2) finds people, including crouched, side-on or small ones
+  that a pose detector alone misses;
+- pose + silhouette run on a crop around the chosen person every frame (sharper outline);
+- when the pose model loses the person, a person segmenter (selfie multiclass) supplies the
+  silhouette for that frame, so the outline does not drop out (those frames have no skeleton);
+- the 21-point hand landmarker runs on crops around each wrist.
+
+The models (~37 MB in total) and the MediaPipe runtime download once from Google's and
+jsDelivr's CDNs and are cached by the browser.
 
 **2. With the local Python server (optional).** The same page, plus a choice to run the analysis
 on the server with YOLOv8 segmentation + ByteTrack + YOLOv8 pose, with MediaPipe for the hands.
@@ -124,5 +132,5 @@ offered (there is no server there).
   less often. The silhouette is still drawn, just without the finger shapes.
 - If the tracker loses the person, it re-acquires them by overlap with, or nearness to, their last
   position. Frames where they are not found show as gaps on the timeline.
-- The in-browser engine runs the pose model on the CPU (WebAssembly): on many GPUs the silhouette
-  mask reads back empty. Expect about 3–6 analysed frames per second; use "every Nth frame" for long clips.
+- The in-browser engine runs on the CPU (WebAssembly): on many GPUs the silhouette mask reads
+  back empty. Expect about 3–5 analysed frames per second; use "every Nth frame" for long clips.
