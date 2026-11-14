@@ -8,7 +8,7 @@ Marey's and Muybridge's chronophotography and figure-drawing motion studies.
 | [`motion_study/`](motion_study/) | **Web app for time–motion study of one person.** Sketch and skeleton grids and overlaps, hands with fingers, limb contours for sitting posture, joint angles, timeline, CSV/SVG/PNG export. Runs fully in the browser (free MediaPipe models) and is published on GitHub Pages; an optional local Python server adds YOLOv8 silhouettes. See [motion_study/README.md](motion_study/README.md). |
 | `motion_sketch.py` | Command-line tool: red-pen outline trails of every person over the original video (YOLOv8-seg + ByteTrack). Documented below. |
 
-**Live web app:** `https://<your-user>.github.io/<this-repo>/` (after GitHub Pages is enabled; see motion_study/README.md).
+**Live web app:** https://kenkada.github.io/motion-study/
 
 ---
 
